@@ -51,7 +51,7 @@ node_embed = (node_embed - node_embed.min()) / (node_embed.max() - node_embed.mi
 node_embed_dim = 2
 
 haversine_dim = 1
-embed_dim = 16
+embed_dim = 3973
 n_input = embed_dim + node_embed_dim
 
 def get_node(index):
