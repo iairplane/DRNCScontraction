@@ -1,0 +1,305 @@
+#%%
+import os
+from sklearn.model_selection import train_test_split
+import pandas as pd
+import dask.dataframe as dd
+
+
+os.environ['KMP_DUPLICATE_LIB_OK']='True'
+
+import time
+import numpy as np
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torch.utils.data import Dataset
+from torch.autograd import Variable
+
+from tqdm import tqdm
+
+import sys
+sys.path.append('code')
+from config import get_config
+params, _ = get_config()
+params.num=10
+device = torch.device("mps" if torch.backends.mps.is_built() else "cpu")
+print('Using mps!' if torch.backends.mps.is_built() else 'Using cpu!')
+
+
+# Load data
+file_name ="D:\pythonProject\data\harbin_data\data_set\harbin_directed_shortest_distance_matrix_train.npy"
+sdm = np.load(file_name)
+sdm = sdm[0:params.num,:]
+maxLengthy = np.max(sdm)
+sdm = sdm/maxLengthy
+num = 1
+n = sdm.shape[1]  # 节点数目
+
+print('node number: ', n)
+
+input_l = (params.num - 1) * n
+
+embed = np.load("D:\pythonProject\data\harbin_data\data_set\embeddings_harbin.npy")
+embed = (embed - embed.min()) / (embed.max() - embed.min())
+
+node_embed = pd.read_csv("D:\pythonProject\data\harbin_data\map\Harbin_nodes_number_sort.txt", sep=',', header=0, index_col=0)
+node_embed_origin = node_embed.copy(deep=True)
+node_embed = (node_embed - node_embed.min()) / (node_embed.max() - node_embed.min())
+node_embed_dim = 2
+
+haversine_dim = 1
+embed_dim = 64
+n_input = embed_dim + node_embed_dim
+
+def get_node(index):
+    node1_index = int(index / (n-1))
+    node2_index = index % (n-1)
+    if node2_index >= node1_index:
+        node2_index += 1
+    return node1_index, node2_index
+
+def get_batch(index_list):
+    l = len(index_list)
+    x1_batch = np.zeros((l, n_input))
+    x2_batch = np.zeros((l, n_input))
+    y_batch = np.zeros((l, 1))
+    z = 0
+    for i in index_list:
+        node1, node2 = get_node(i)
+        x1_batch[z] = np.concatenate((embed[node1], np.array(node_embed.iloc[node1])))
+        x2_batch[z] = np.concatenate((embed[node2], np.array(node_embed.iloc[node2])))
+        #x1_batch[z] = np.concatenate((embed[:, node1], np.array(node_embed.iloc[node1])))
+        #x2_batch[z] = np.concatenate((embed[:, node2], np.array(node_embed.iloc[node2])))
+        y_batch[z] = sdm[node1][node2]
+        z += 1
+    return x1_batch, x2_batch, y_batch
+
+# Step 1: Split the dataset into train, valid, and test sets
+# Assuming you have a function or list of indices for train, valid, and test splits
+# Replace with your actual split logic
+train_indices, temp_indices = train_test_split(np.arange(input_l), test_size=0.3, random_state=42)
+valid_indices, test_indices = train_test_split(temp_indices, test_size=0.5, random_state=42)
+
+n_hidden_1 = 400
+n_hidden_2 = 100
+n_hidden_3 = 20
+n_output = 8
+s = 2
+r = 2
+
+class MultiLayerPerceptron(nn.Module):
+    def __init__(self, n_input, n_hidden_1, n_hidden_2, n_hidden_3, n_output):
+        super(MultiLayerPerceptron, self).__init__()
+        self.fc1 = nn.Linear(n_input, n_hidden_1)
+        self.fc2 = nn.Linear(n_hidden_1*2, n_hidden_2)
+        self.fc3 = nn.Linear(n_hidden_2, n_hidden_3)
+        self.fc4 = nn.Linear(n_hidden_3, n_output)
+
+    def forward(self, x1, x2):
+        layer_11 = F.relu(self.fc1(x1))
+        layer_12 = F.relu(self.fc1(x2))
+        layer_1 = torch.cat((layer_11, layer_12), 1)
+        layer_2 = F.relu(self.fc2(layer_1))
+        layer_3 = F.relu(self.fc3(layer_2))
+        out_layer = torch.sigmoid(self.fc4(layer_3))
+        # out_layer_2 = torch.mean(torch.abs(out_layer[:, 4:] - out_layer[:, 0:4]), -1, keepdims=True)
+        out_layer_2 = (torch.mean(torch.abs(out_layer[:, 4:4 + s] - out_layer[:, 0:s]), -1,
+                                  keepdims=True) * s + torch.mean((out_layer[:, 4 + s:] - out_layer[:, s:4]), -1,
+                                                                  keepdims=True) * r) / int(n_output / 2)
+        return out_layer_2
+
+# Initialize your model
+model = MultiLayerPerceptron(n_input, n_hidden_1, n_hidden_2, n_hidden_3, n_output).to(device)
+
+# Define training parameters
+learning_rate = 0.01
+training_epochs = 20
+batch_size = 64
+display_step = 1
+total_batch_train = int(input_l*0.7 / batch_size) + 1
+
+# Initialize optimizer and loss function
+optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+criterion = nn.L1Loss()
+
+# Split data into train, valid, test
+# Assuming data is already loaded and processed, and `input_l` is the length of your dataset
+indices = np.random.permutation(input_l)
+
+# Function to get batch data
+
+
+# Training loop
+loss_min = 100
+start_time = time.time()
+
+for epoch in range(training_epochs):
+    avg_cost = 0.
+
+    # Training phase
+    for j in tqdm(range(total_batch_train - 1)):
+        start = j * batch_size
+        end = (j + 1) * batch_size
+        if end >= int(input_l*0.7):
+            end = int(input_l*0.7) - 1
+
+        batch_x1, batch_x2, batch_y = get_batch(train_indices[start:end])
+        batch_x1 = Variable(torch.from_numpy(batch_x1).float()).to(device)
+        batch_x2 = Variable(torch.from_numpy(batch_x2).float()).to(device)
+        batch_y = Variable(torch.from_numpy(batch_y).float()).to(device)
+
+        optimizer.zero_grad()
+        outputs = model(batch_x1, batch_x2)
+        loss = criterion(outputs, batch_y)
+        loss.backward()
+        optimizer.step()
+        avg_cost += loss.data.item() / total_batch_train
+
+    # Validation phase
+    model.eval()
+    valid_loss = 0.
+    with torch.no_grad():
+        for j in range(int(len(valid_indices) / batch_size)):
+            start = j * batch_size
+            end = (j + 1) * batch_size
+            batch_x1, batch_x2, batch_y = get_batch(valid_indices[start:end])
+            batch_x1 = Variable(torch.from_numpy(batch_x1).float()).to(device)
+            batch_x2 = Variable(torch.from_numpy(batch_x2).float()).to(device)
+            batch_y = Variable(torch.from_numpy(batch_y).float()).to(device)
+
+            outputs = model(batch_x1, batch_x2)
+            valid_loss += criterion(outputs, batch_y).item()
+
+    valid_loss /= int(len(valid_indices) / batch_size)
+    model.train()
+
+    # Save model if validation loss is lower than minimum seen so far
+    if valid_loss < loss_min:
+        loss_min = valid_loss
+        torch.save(model.state_dict(), "param/vdist2vec_model_harbin_tildeL1.ckpt")
+
+    # Print epoch statistics
+    if epoch % display_step == 0:
+        print(f"Epoch: {epoch+1:04d}, Training Loss: {avg_cost:.9f}, Validation Loss: {valid_loss:.9f}")
+
+print("Optimization Finished!")
+end_time = time.time()
+print("Training time: ", end_time - start_time)
+
+# Testing phase (evaluate on test set)
+model.eval()
+test_loss = 0.
+
+
+
+
+
+# total_batch = params.num * n // batch_size
+result = []
+real_dis = []
+
+start_time = time.time()
+# for i in tqdm(range(total_batch-1)):
+#     start = i * batch_size
+#     end = (i+1)*batch_size
+#     if end >= input_l:
+#         end = input_l
+#     batch_x1, batch_x2, batch_y = get_eval_batch(start, end)
+#     batch_x1 = Variable(torch.from_numpy(batch_x1).float()).to(device)
+#     batch_x2 = Variable(torch.from_numpy(batch_x2).float()).to(device)
+#     batch_y = Variable(torch.from_numpy(batch_y).float()).to(device)
+with torch.no_grad():
+    for j in range(int(len(test_indices) / batch_size)):
+        start = j * batch_size
+        end = (j + 1) * batch_size
+        batch_x1, batch_x2, batch_y = get_batch(test_indices[start:end])
+        batch_x1 = Variable(torch.from_numpy(batch_x1).float()).to(device)
+        batch_x2 = Variable(torch.from_numpy(batch_x2).float()).to(device)
+        batch_y = Variable(torch.from_numpy(batch_y).float()).to(device)
+
+        outputs = model(batch_x1, batch_x2)
+        test_loss += criterion(outputs, batch_y).item()
+    result_temp = model(batch_x1, batch_x2).detach().cpu().numpy().reshape(-1)
+    result = np.append(result, result_temp)
+    real_dis = np.append(real_dis, batch_y.detach().cpu().numpy().reshape(-1))
+end_time = time.time()
+print("Test time:", end_time-start_time)
+
+#%%
+real_dis = real_dis * maxLengthy
+result = result * maxLengthy
+
+#%% 删除real_dis中的0和result对应位置的结果
+result = np.delete(result, np.where(real_dis == 0.0))
+real_dis = np.delete(real_dis, np.where(real_dis == 0.0))
+
+abe = np.fabs(real_dis - result)
+re = abe/real_dis
+
+mse = (abe ** 2).mean()
+maxe = np.max(abe ** 2)
+mine = np.min(abe ** 2)
+mabe = abe.mean()
+maxae = np.max(abe)
+minae = np.min(abe)
+mre = re.mean()
+maxre = np.max(re)
+minre = np.min(re)
+print('real_dis', real_dis[:10])
+print('result', result[:10])
+print ("mean square error:", mse)
+print ("max square error:", maxe)
+print ("min square error:", mine)
+print ("mean absolute error:", mabe)
+print ("max absolute error:", maxae)
+print ("min absolute error:", minae)
+print ("mean relative error:", mre)
+print ("max relative error:", maxre)
+print ("min relative error:", minre)
+
+#%% 绘制re数据的分布情况
+import matplotlib.pyplot as plt
+import numpy as np
+
+arange = (0, 0.2)
+
+# 创建直方图
+plt.hist(re, bins=100, alpha=0.5, color='g', range = arange)
+plt.savefig('figure/vdist2vec_distribution_harbin_tildeL1.pdf')
+
+#%% 统计>0.2的数量及百分比
+count = 0
+for i in re:
+    if i > 0.2:
+        count += 1
+print(count)
+print(count/len(re))
+
+#%% 统计>1的数量及百分比
+count = 0
+for i in re:
+    if i > 1:
+        count += 1
+print(count)
+print(count/len(re))
+
+#%% 绘制re数据的分布情况
+import matplotlib.pyplot as plt
+import numpy as np
+
+max_re = np.max(re)
+
+arange = (0, max_re)
+
+# 创建直方图
+plt.hist(re, bins=100, alpha=0.5, color='g', range = arange)
+plt.savefig('figure/vdist2vec_distribution_harbin_tildeL1_all.pdf')
+
+
+
+
+# Optionally load best model
+model.load_state_dict(torch.load("param/vdist2vec_model_harbin_tildeL1.ckpt", map_location=device))
