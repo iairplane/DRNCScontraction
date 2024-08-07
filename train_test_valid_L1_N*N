@@ -115,7 +115,7 @@ model = MultiLayerPerceptron(n_input, n_hidden_1, n_hidden_2, n_hidden_3, n_outp
 # Define training parameters
 learning_rate = 0.01
 training_epochs = 20
-batch_size = 64
+batch_size = 6598
 display_step = 1
 total_batch_train = int(input_l*0.7 / batch_size) + 1
 
@@ -136,7 +136,7 @@ start_time = time.time()
 
 for epoch in range(training_epochs):
     avg_cost = 0.
-    total_batch_train=512
+    total_batch_train=300
     # Training phase
     for j in tqdm(range(total_batch_train - 1)):
         start = j * batch_size
@@ -161,7 +161,8 @@ for epoch in range(training_epochs):
     valid_loss = 0.
     with torch.no_grad():
         # for j in range(int(len(valid_indices) / batch_size)):
-        for j in range(256):
+        for j in range(64):
+
             start = j * batch_size
             end = (j + 1) * batch_size
             batch_x1, batch_x2, batch_y = get_batch(valid_indices[start:end])
@@ -212,7 +213,7 @@ start_time = time.time()
 #     batch_y = Variable(torch.from_numpy(batch_y).float()).to(device)
 with torch.no_grad():
     # for j in range(int(len(test_indices) / batch_size)):
-    for j in range(256):
+    for j in range(64):
         start = j * batch_size
         end = (j + 1) * batch_size
         batch_x1, batch_x2, batch_y = get_batch(test_indices[start:end])
